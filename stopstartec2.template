@@ -94,7 +94,7 @@ Resources:
 
           def lambda_handler(event, context):
               ec2 = boto3.client('ec2')
-              instance_name = os.environ['INSTANCE_NAME']
+              instance_name = os.environ['topawards-services']
               
               # Find the instance ID by name
               response = ec2.describe_instances(
