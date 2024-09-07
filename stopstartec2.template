@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS Instance Scheduler to start/stop an EC2 instance named 'topawards-services' on a specific schedule.
+
+Parameters:
+  InstanceName:
+    Type: String
+    Default: topawards-services
+    Description: The name of the EC2 instance to schedule.
+
+Resources:
+  # DynamoDB Table for storing schedules
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ConfigTable
+      AttributeDefinitions:
+        - AttributeName: type
+          AttributeType: S
+        - AttributeName: name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: type
+          KeyType: HASH
+        - AttributeName: name
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # IAM Role for Lambda Functions
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EC2SchedulerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:DescribeInstances
+                Resource: "*"
+
+  # Lambda Function to Start EC2 Instance
+  StartInstanceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: start_instance.lambda_handler
+      Role: !GetAtt SchedulerRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              ec2 = boto3.client('ec2')
+              instance_name = os.environ['INSTANCE_NAME']
+              
+              # Find the instance ID by name
+              response = ec2.describe_instances(
+                  Filters=[{'Name': 'tag:Name', 'Values': [instance_name]}]
+              )
+              instance_ids = [i['InstanceId'] for r in response['Reservations'] for i in r['Instances']]
+              
+              if instance_ids:
+                  ec2.start_instances(InstanceIds=instance_ids)
+                  return 'Started instance(s): ' + ', '.join(instance_ids)
+              else:
+                  return 'No instance found with name: ' + instance_name
+      Runtime: python3.8
+      Environment:
+        INSTANCE_NAME: !Ref InstanceName
+      Timeout: 30
+
+  # Lambda Function to Stop EC2 Instance
+  StopInstanceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: stop_instance.lambda_handler
+      Role: !GetAtt SchedulerRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              ec2 = boto3.client('ec2')
+              instance_name = os.environ['INSTANCE_NAME']
+              
+              # Find the instance ID by name
+              response = ec2.describe_instances(
+                  Filters=[{'Name': 'tag:Name', 'Values': [instance_name]}]
+              )
+              instance_ids = [i['InstanceId'] for r in response['Reservations'] for i in r['Instances']]
+              
+              if instance_ids:
+                  ec2.stop_instances(InstanceIds=instance_ids)
+                  return 'Stopped instance(s): ' + ', '.join(instance_ids)
+              else:
+                  return 'No instance found with name: ' + instance_name
+      Runtime: python3.8
+      Environment:
+        INSTANCE_NAME: !Ref InstanceName
+      Timeout: 30
+
+  # CloudWatch Event Rule for Starting Instance
+  StartRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0 14 ? * FRI *)  # 9:00 AM EST (UTC-5)
+      Targets:
+        - Arn: !GetAtt StartInstanceFunction.Arn
+          Id: "StartInstanceTarget"
+
+  # CloudWatch Event Rule for Stopping Instance
+  StopRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0 16 ? * SUN *)  # 11:00 AM EST (UTC-5)
+      Targets:
+        - Arn: !GetAtt StopInstanceFunction.Arn
+          Id: "StopInstanceTarget"
+
+  # Permissions for CloudWatch to invoke Lambda functions
+  LambdaInvokePermissionStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StartInstanceFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartRule.Arn
+
+  LambdaInvokePermissionStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StopInstanceFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopRule.Arn
+
+Outputs:
+  InstanceName:
+    Description: The name of the EC2 instance being scheduled.
+    Value: !Ref InstanceName
